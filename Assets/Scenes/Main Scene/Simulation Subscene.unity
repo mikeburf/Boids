@@ -130,7 +130,7 @@ GameObject:
   - component: {fileID: 248937962}
   - component: {fileID: 248937961}
   m_Layer: 0
-  m_Name: SetupAuthoring
+  m_Name: Settings Authoring
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -154,10 +154,10 @@ MonoBehaviour:
   MaxSpeed: 5
   CellSize: 0.5
   CohesionWeight: 1
-  AlignmentWeight: 1.74
+  AlignmentWeight: 1.75
   SeperationWeight: 2
   SeperationDistance: 0.75
-  TargetSeekWeight: 0.46
+  TargetSeekWeight: 0.5
 --- !u!4 &248937962
 Transform:
   m_ObjectHideFlags: 0
