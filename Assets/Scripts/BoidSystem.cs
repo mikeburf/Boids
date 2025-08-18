@@ -2,16 +2,9 @@ using System.Runtime.CompilerServices;
 using Unity.Burst;
 using Unity.Collections;
 using Unity.Entities;
-using Unity.Entities.UniversalDelegates;
 using Unity.Jobs;
 using Unity.Mathematics;
 using Unity.Transforms;
-using UnityEditor.ShaderGraph.Internal;
-using UnityEngine;
-using UnityEngine.LightTransport;
-using UnityEngine.Rendering;
-using static UnityEditor.PlayerSettings;
-using static UnityEngine.Rendering.HDROutputUtils;
 
 namespace Boids
 {
@@ -29,7 +22,7 @@ namespace Boids
             state.RequireForUpdate<Settings>();
 
             boidQuery = new EntityQueryBuilder(Allocator.Temp)
-                .WithAll<Boid, LocalTransform>()
+                .WithAll<Boid, LocalToWorld>()
                 .Build(ref state);
 
         }
@@ -66,7 +59,7 @@ namespace Boids
             var copyDataJobHandle = new CopyDataJob
             {
                 Positions = Positions,
-                Velocities = Headings,
+                Headings = Headings,
             }.ScheduleParallel(boidQuery, state.Dependency);
 
             var initHandle = JobHandle.CombineDependencies(hashJobHandle, copyDataJobHandle);
@@ -76,15 +69,16 @@ namespace Boids
                 BoidHashes = CellHash,
                 CellIndices = BoidHashes,
                 Positions = Positions,
-                Velocities = Headings,
-                DeltaVs = NewHeadings,
+                Headings = Headings,
+                NewHeadings = NewHeadings,
                 Settings = settings,
             }.ScheduleParallel(boidCount, 32, initHandle);
 
             var boidUpdateJobHandle = new BoidUpdateJob
             {
-                DeltaVs = NewHeadings,
-                Damping = settings.Damping,
+                NewHeadings = NewHeadings,
+                TurnSpeed = settings.turnSpeed,
+                MoveSpeed = settings.MoveSpeed,
                 DeltaTime = SystemAPI.Time.DeltaTime
             }.ScheduleParallel(boidQuery, steerJobHandle);
 
@@ -119,8 +113,7 @@ namespace Boids
         }
     }
 
-    // using a hashmap for now as an alternative a proper space-partitioning structure.
-    // has the limitation at the moment of essentially ignoring everything outside the current cell
+
     [BurstCompile]
     public partial struct HashJob : IJobEntity
     {
@@ -132,7 +125,7 @@ namespace Boids
         public float InverseCellSize;
 
         [BurstCompile]
-        public void Execute([EntityIndexInQuery] int indexInQuery, in Boid boid, in LocalTransform transform)
+        public void Execute([EntityIndexInQuery] int indexInQuery, in Boid boid, in LocalToWorld transform)
         {
 
             int hash = GetHash(transform.Position, InverseCellSize);
@@ -159,13 +152,13 @@ namespace Boids
         [WriteOnly]
         public NativeArray<float3> Positions;
         [WriteOnly]
-        public NativeArray<float3> Velocities;
+        public NativeArray<float3> Headings;
 
         [BurstCompile]
-        public void Execute([EntityIndexInQuery] int entityIndexInQuery, in Boid boid, in LocalTransform transform)
+        public void Execute([EntityIndexInQuery] int entityIndexInQuery, in Boid boid, in LocalToWorld transform)
         {
             Positions[entityIndexInQuery] = transform.Position;
-            Velocities[entityIndexInQuery] = boid.Velocity;
+            Headings[entityIndexInQuery] = transform.Forward;
         }
     }
 
@@ -176,9 +169,9 @@ namespace Boids
         [ReadOnly] public NativeParallelMultiHashMap<int, int> BoidHashes;
 
         [ReadOnly] public NativeArray<float3> Positions;
-        [ReadOnly] public NativeArray<float3> Velocities;
+        [ReadOnly] public NativeArray<float3> Headings;
 
-        [WriteOnly] public NativeArray<float3> DeltaVs;
+        [WriteOnly] public NativeArray<float3> NewHeadings;
 
         public Settings Settings;
 
@@ -204,7 +197,7 @@ namespace Boids
                 if (math.distancesq(Positions[i], Positions[index]) > sqrDetectSize) continue;
 
                 averagePos += Positions[i];
-                averageV += Velocities[i];
+                averageV += Headings[i];
 
 
                 if (math.distancesq(Positions[index], Positions[i]) < sqrSeperationDistance)
@@ -213,28 +206,28 @@ namespace Boids
                 neighbors++;
             }
 
-            float3 velocityChange = float3.zero;
+            float3 newHeadings = float3.zero;
 
             if (neighbors > 0)
             {
                 averageV /= neighbors;
                 averagePos /= neighbors;
 
-                velocityChange += (averageV - Velocities[index]) * Settings.AlignmentWeight;
-                velocityChange += (averagePos - Positions[index]) * Settings.CohesionWeight;
+                newHeadings += (averageV - Headings[index]) * Settings.AlignmentWeight;
+                newHeadings += (averagePos - Positions[index]) * Settings.CohesionWeight;
 
                 if (Settings.SeperationDistance > 0)
-                    velocityChange += seperation * Settings.SeperationWeight / Settings.SeperationDistance;
+                    newHeadings += seperation * Settings.SeperationWeight / Settings.SeperationDistance;
             }
 
             float sqrSeekDistance = Settings.TargetSeekDistance * Settings.TargetSeekDistance;
 
             if (math.distancesq(Positions[index], Settings.TargetPosition) > sqrSeekDistance)
             {
-                velocityChange += (Settings.TargetPosition - Positions[index]) * Settings.TargetSeekWeight;
+                newHeadings += (Settings.TargetPosition - Positions[index]) * Settings.TargetSeekWeight;
             }
 
-            DeltaVs[index] = velocityChange;    
+            NewHeadings[index] = newHeadings;    
         }
 
     }
@@ -243,30 +236,26 @@ namespace Boids
     public partial struct BoidUpdateJob : IJobEntity
     {
         [ReadOnly]
-        public NativeArray<float3> DeltaVs;
+        public NativeArray<float3> NewHeadings;
 
-        public float Damping;
-
+        public float TurnSpeed;
+        public float MoveSpeed;
         public float DeltaTime;
 
         [BurstCompile]
-        public void Execute([EntityIndexInQuery] int indexInQuery, ref Boid boid, ref LocalTransform transform)
+        public void Execute([EntityIndexInQuery] int indexInQuery, in Boid boid, ref LocalToWorld transform)
         {
-            boid.Velocity += DeltaVs[indexInQuery] * DeltaTime;
+            float3 target = math.normalizesafe(NewHeadings[indexInQuery]) * TurnSpeed;
+            float3 newHeading = math.normalizesafe(transform.Forward + (target - transform.Forward) * DeltaTime);
 
-            boid.Velocity *= (1 - Damping * DeltaTime);
-
-
-            /*
-            float sqrSpeed = math.lengthsq(boid.Velocity);
-
-            if (sqrSpeed > Damping)
+            transform = new LocalToWorld
             {
-                boid.Velocity *= math.sqrt(Damping / sqrSpeed);
-            }
-            */
+                Value = float4x4.TRS(
 
-            transform.Position += boid.Velocity * DeltaTime;
+                        new float3(transform.Position + (newHeading * MoveSpeed * DeltaTime)),
+                        quaternion.LookRotationSafe(newHeading, math.up()),
+                        transform.Value.Scale())
+            };
         }
     }
 }

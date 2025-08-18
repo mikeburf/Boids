@@ -10,10 +10,10 @@ namespace Boids
         {
             public override void Bake(BoidAuthoring authoring)
             {
-                Entity entity = GetEntity(TransformUsageFlags.Dynamic);
+                Entity entity = GetEntity(TransformUsageFlags.Renderable | TransformUsageFlags.WorldSpace);
                 AddComponent(entity, new Boid
                 {
-                    Velocity = new float3(0, 0, 0)
+
                 });
             }
         }
@@ -21,6 +21,5 @@ namespace Boids
 
     public struct Boid : IComponentData
     {
-        public float3 Velocity;
     }
 }

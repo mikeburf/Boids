@@ -12,7 +12,8 @@ namespace Boids
         public float SpawnBounds;
 
         [Header("Config")]
-        public float Damping;
+        public float MoveSpeed;
+        public float TurnSpeed;
         public float CellSize;
         [Min(0)] public int DetectionCellSize; // the edge size of the AABB used to determine neighbors
 
@@ -35,7 +36,8 @@ namespace Boids
                 {
                     Prefab = prefab,
                     TargetPosition = authoring.transform.position,
-                    Damping = authoring.Damping,
+                    MoveSpeed = authoring.MoveSpeed,
+                    turnSpeed = authoring.TurnSpeed,
                     CellSize = authoring.CellSize,
                     DetectionCellSize = authoring.DetectionCellSize,
 
@@ -60,7 +62,8 @@ namespace Boids
     {
         public Entity Prefab;
         public float3 TargetPosition;
-        public float Damping;
+        public float MoveSpeed;
+        public float turnSpeed;
         public float CellSize;
         public int DetectionCellSize;
 
