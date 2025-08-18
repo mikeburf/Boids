@@ -12,13 +12,17 @@ namespace Boids
         public float SpawnBounds;
 
         [Header("Config")]
-        public float MaxSpeed;
+        public float Damping;
         public float CellSize;
+        [Min(0)] public int DetectionCellSize; // the edge size of the AABB used to determine neighbors
+
+        [Header("Weights")]
         public float CohesionWeight = 0.01f;
         public float AlignmentWeight = 0.125f;
         public float SeperationWeight = 1f;
         public float SeperationDistance = 1f;
         public float TargetSeekWeight = 1f;
+        public float TargetSeekDistance = 10f;
 
         class Baker : Baker<SettingsAuthoring>
         {
@@ -31,14 +35,16 @@ namespace Boids
                 {
                     Prefab = prefab,
                     TargetPosition = authoring.transform.position,
-                    SqrMaxSpeed = authoring.MaxSpeed * authoring.MaxSpeed,
-                    InverseCellSize = 1 / authoring.CellSize,
+                    Damping = authoring.Damping,
+                    CellSize = authoring.CellSize,
+                    DetectionCellSize = authoring.DetectionCellSize,
 
                     CohesionWeight = authoring.CohesionWeight,
                     AlignmentWeight = authoring.AlignmentWeight,
                     SeperationWeight = authoring.SeperationWeight,
                     SeperationDistance = authoring.SeperationDistance,
-                    TargetSeekWeight = authoring.TargetSeekWeight
+                    TargetSeekWeight = authoring.TargetSeekWeight,
+                    TargetSeekDistance = authoring.TargetSeekDistance
                 });
                 AddComponent(entity, new SpawnOnce
                 {
@@ -54,14 +60,16 @@ namespace Boids
     {
         public Entity Prefab;
         public float3 TargetPosition;
-        public float SqrMaxSpeed;
-        public float InverseCellSize;
+        public float Damping;
+        public float CellSize;
+        public int DetectionCellSize;
 
         public float CohesionWeight;
         public float AlignmentWeight;
         public float SeperationWeight;
         public float SeperationDistance;
         public float TargetSeekWeight;
+        public float TargetSeekDistance;
     }
 
     public struct SpawnOnce : IComponentData

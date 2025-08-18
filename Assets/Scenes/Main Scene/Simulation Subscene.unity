@@ -150,14 +150,16 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   Prefab: {fileID: 1663559406793173153, guid: be3a176b9199fd94b974280fad502c8f, type: 3}
   Count: 1000
-  SpawnBounds: 4
-  MaxSpeed: 5
-  CellSize: 0.5
+  SpawnBounds: 2
+  Damping: 1
+  CellSize: 1
+  DetectionCellSize: 1
   CohesionWeight: 1
-  AlignmentWeight: 1.75
-  SeperationWeight: 2
-  SeperationDistance: 0.75
-  TargetSeekWeight: 0.5
+  AlignmentWeight: 1
+  SeperationWeight: 5
+  SeperationDistance: 0.25
+  TargetSeekWeight: 0.01
+  TargetSeekDistance: 5
 --- !u!4 &248937962
 Transform:
   m_ObjectHideFlags: 0

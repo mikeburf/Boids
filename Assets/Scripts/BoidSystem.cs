@@ -1,10 +1,17 @@
+using System.Runtime.CompilerServices;
 using Unity.Burst;
 using Unity.Collections;
 using Unity.Entities;
+using Unity.Entities.UniversalDelegates;
 using Unity.Jobs;
 using Unity.Mathematics;
 using Unity.Transforms;
+using UnityEditor.ShaderGraph.Internal;
+using UnityEngine;
 using UnityEngine.LightTransport;
+using UnityEngine.Rendering;
+using static UnityEditor.PlayerSettings;
+using static UnityEngine.Rendering.HDROutputUtils;
 
 namespace Boids
 {
@@ -29,58 +36,64 @@ namespace Boids
             Settings settings = SystemAPI.GetSingleton<Settings>();
 
             int boidCount = boidQuery.CalculateEntityCount();
-            var CellHash = new NativeParallelMultiHashMap<int, int>(boidCount, state.WorldUnmanaged.UpdateAllocator.ToAllocator);
-            var CellIndices = CollectionHelper.CreateNativeArray<int, RewindableAllocator>(boidCount, ref state.WorldUnmanaged.UpdateAllocator);
+
             var Positions = CollectionHelper.CreateNativeArray<float3, RewindableAllocator>(boidCount, ref state.WorldUnmanaged.UpdateAllocator);
             var Velocities = CollectionHelper.CreateNativeArray<float3, RewindableAllocator>(boidCount, ref state.WorldUnmanaged.UpdateAllocator);
-            var AvgPositions = CollectionHelper.CreateNativeArray<float3, RewindableAllocator>(boidCount, ref state.WorldUnmanaged.UpdateAllocator);
-            var AvgVelocities = CollectionHelper.CreateNativeArray<float3, RewindableAllocator>(boidCount, ref state.WorldUnmanaged.UpdateAllocator);
-            var SeperationVectors = CollectionHelper.CreateNativeArray<float3, RewindableAllocator>(boidCount, ref state.WorldUnmanaged.UpdateAllocator);
+            var VelocityChanges = CollectionHelper.CreateNativeArray<float3, RewindableAllocator>(boidCount, ref state.WorldUnmanaged.UpdateAllocator);
+
+            int offsetCount = 2 * settings.DetectionCellSize + 1;
+            offsetCount *= offsetCount * offsetCount;
+            offsetCount -= 1;
+
+            var SearchOffsets = CollectionHelper.CreateNativeArray<float3, RewindableAllocator>(offsetCount, ref state.WorldUnmanaged.UpdateAllocator);
+            int size = 0;
+            for (int dx = -settings.DetectionCellSize; dx <= settings.DetectionCellSize; dx++)
+                for (int dy = -settings.DetectionCellSize; dy <= settings.DetectionCellSize; dy++)
+                    for (int dz = -settings.DetectionCellSize; dz <= settings.DetectionCellSize; dz++)
+                    {
+                        if (dx == 0 && dy == 0 && dz == 0) continue;
+                        float3 offset = settings.CellSize * math.float3(dx, dy, dz);
+                        SearchOffsets[size++] = offset;
+                    }
+
+            
+
+            var CellHash = new NativeParallelMultiHashMap<int, int>(boidCount * (offsetCount + 1), state.WorldUnmanaged.UpdateAllocator.ToAllocator);
+            var BoidHashes = CollectionHelper.CreateNativeArray<int, RewindableAllocator>(boidCount, ref state.WorldUnmanaged.UpdateAllocator);
+
 
             var hashJobHandle = new HashJob
             {
                 CellHash = CellHash.AsParallelWriter(),
-                CellIndices = CellIndices,
-                InverseCellSize = settings.InverseCellSize,
+                BoidHashes = BoidHashes,
+                InverseCellSize = 1 / settings.CellSize,
+                SearchOffsets = SearchOffsets,
             }.ScheduleParallel(boidQuery, state.Dependency);
 
-            var dataJobHandle = new DataJob
+            var copyDataJobHandle = new CopyDataJob
             {
                 Positions = Positions,
                 Velocities = Velocities,
             }.ScheduleParallel(boidQuery, state.Dependency);
 
-            var initHandle = JobHandle.CombineDependencies(hashJobHandle, dataJobHandle);
+            var initHandle = JobHandle.CombineDependencies(hashJobHandle, copyDataJobHandle);
 
-            var avgJobHandle = new AvgJob
+            var steerJobHandle = new SteerJob
             {
-                CellHash = CellHash,
-                CellIndices = CellIndices,
+                BoidHashes = CellHash,
+                CellIndices = BoidHashes,
                 Positions = Positions,
                 Velocities = Velocities,
-                AvgPosition = AvgPositions,
-                AvgVelocity = AvgVelocities
+                DeltaVs = VelocityChanges,
+                Settings = settings,
             }.ScheduleParallel(boidCount, 32, initHandle);
-
-            var seperationJobHandle = new SeperationJob
-            {
-                CellHash = CellHash,
-                CellIndices = CellIndices,
-                Positions = Positions,
-                SeperationVectors = SeperationVectors,
-                SqrSeperationDistance = settings.SeperationDistance * settings.SeperationDistance,
-            }.ScheduleParallel(boidCount, 32, initHandle);
-
-            var calcJobHandle = JobHandle.CombineDependencies(avgJobHandle, seperationJobHandle);
 
             var boidUpdateJobHandle = new BoidUpdateJob
             {
-                AvgPositions = AvgPositions,
-                AvgVelocities = AvgVelocities,
-                SeperationVectors = SeperationVectors,
-                settings = settings,
+                DeltaVs = VelocityChanges,
+                Damping = settings.Damping,
                 DeltaTime = SystemAPI.Time.DeltaTime
-            }.ScheduleParallel(boidQuery, calcJobHandle);
+            }.ScheduleParallel(boidQuery, steerJobHandle);
 
             state.Dependency = boidUpdateJobHandle;
         }
@@ -98,7 +111,9 @@ namespace Boids
     public partial struct HashJob : IJobEntity
     {
         [WriteOnly] public NativeParallelMultiHashMap<int, int>.ParallelWriter CellHash;
-        [WriteOnly] public NativeArray<int> CellIndices;
+        [WriteOnly] public NativeArray<int> BoidHashes;
+
+        [ReadOnly] public NativeArray<float3> SearchOffsets;
 
         public float InverseCellSize;
 
@@ -106,16 +121,26 @@ namespace Boids
         public void Execute([EntityIndexInQuery] int indexInQuery, in Boid boid, in LocalTransform transform)
         {
 
-            int hash = (int)math.hash(math.int3(math.floor(transform.Position * InverseCellSize)));
+            int hash = GetHash(transform.Position, InverseCellSize);
+            CellHash.Add(indexInQuery, hash);
+            BoidHashes[indexInQuery] = hash;
 
-            CellIndices[indexInQuery] = hash;
+            for (int i = 0; i < SearchOffsets.Length; i++)
+            {
+                CellHash.Add(GetHash(transform.Position + SearchOffsets[i], InverseCellSize), indexInQuery);
+            }
+        }
 
-            CellHash.Add(hash, indexInQuery);
+        [BurstCompile]
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static int GetHash(in float3 pos, float inverseCellSize)
+        {
+            return (int)math.hash(math.int3(math.floor(pos * inverseCellSize)));
         }
     }
 
     [BurstCompile]
-    public partial struct DataJob : IJobEntity
+    public partial struct CopyDataJob : IJobEntity
     {
         [WriteOnly]
         public NativeArray<float3> Positions;
@@ -130,112 +155,102 @@ namespace Boids
         }
     }
 
-    public struct AvgJob : IJobFor
+    [BurstCompile]
+    public struct SteerJob : IJobFor
     {
         [ReadOnly] public NativeArray<int> CellIndices;
-        [ReadOnly] public NativeParallelMultiHashMap<int, int> CellHash;
+        [ReadOnly] public NativeParallelMultiHashMap<int, int> BoidHashes;
 
         [ReadOnly] public NativeArray<float3> Positions;
         [ReadOnly] public NativeArray<float3> Velocities;
 
-        [WriteOnly] public NativeArray<float3> AvgPosition;
-        [WriteOnly] public NativeArray<float3> AvgVelocity;
+        [WriteOnly] public NativeArray<float3> DeltaVs;
 
+        public Settings Settings;
+
+        [BurstCompile]
         public void Execute(int index)
         {
-            var myCell = CellHash.GetValuesForKey(CellIndices[index]);
+            var myCell = BoidHashes.GetValuesForKey(CellIndices[index]);
 
-
-            float3 v = float3.zero;
-            float3 p = float3.zero;
-            int count = 0;
-            while (myCell.MoveNext())
-            {
-                int i = myCell.Current;
-                if (i == index) continue; // Skip self in average calculation
-                v += Positions[i];
-                p += Velocities[i];
-                count++;
-            }
-
-            if (count <= 0)
-            {
-                AvgPosition[index] = 0;
-                AvgVelocity[index] = 0;
-            }
-            else
-            {
-                v /= count;
-                p /= count;
-
-                AvgPosition[index] = p;
-                AvgVelocity[index] = v;
-            }
-        }
-    }
-
-    public struct SeperationJob : IJobFor
-    {
-        [ReadOnly] public NativeArray<int> CellIndices;
-        [ReadOnly] public NativeParallelMultiHashMap<int, int> CellHash;
-
-        [ReadOnly] public NativeArray<float3> Positions;
-        [WriteOnly] public NativeArray<float3> SeperationVectors;
-
-        public float SqrSeperationDistance;
-        public void Execute(int index)
-        {
-            var myCell = CellHash.GetValuesForKey(CellIndices[index]);
-            float3 pos = Positions[index];
-
+            float3 averageV = float3.zero;
+            float3 averagePos = float3.zero;
             float3 seperation = float3.zero;
+            int neighbors = 0;
+
+            float sqrSeperationDistance = Settings.SeperationDistance * Settings.SeperationDistance;
+            float sqrDetectSize = (Settings.DetectionCellSize * Settings.CellSize);
+            sqrDetectSize *= sqrDetectSize;
 
             while (myCell.MoveNext())
             {
                 int i = myCell.Current;
-                if (i == index) continue;
-                if (math.distancesq(pos, Positions[i]) < SqrSeperationDistance)
-                    seperation += pos - Positions[i];
+                if (i == index) continue; // Skip self
+
+                if (math.distancesq(Positions[i], Positions[index]) > sqrDetectSize) continue;
+
+                averagePos += Positions[i];
+                averageV += Velocities[i];
+
+
+                if (math.distancesq(Positions[index], Positions[i]) < sqrSeperationDistance)
+                    seperation += Positions[index] - Positions[i];
+
+                neighbors++;
             }
-            SeperationVectors[index] = seperation;
+
+            float3 velocityChange = float3.zero;
+
+            if (neighbors > 0)
+            {
+                averageV /= neighbors;
+                averagePos /= neighbors;
+
+                velocityChange += (averageV - Velocities[index]) * Settings.AlignmentWeight;
+                velocityChange += (averagePos - Positions[index]) * Settings.CohesionWeight;
+
+                if (Settings.SeperationDistance > 0)
+                    velocityChange += seperation * Settings.SeperationWeight / Settings.SeperationDistance;
+            }
+
+            float sqrSeekDistance = Settings.TargetSeekDistance * Settings.TargetSeekDistance;
+
+            if (math.distancesq(Positions[index], Settings.TargetPosition) > sqrSeekDistance)
+            {
+                velocityChange += (Settings.TargetPosition - Positions[index]) * Settings.TargetSeekWeight;
+            }
+
+            DeltaVs[index] = velocityChange;    
         }
+
     }
 
     [BurstCompile]
     public partial struct BoidUpdateJob : IJobEntity
     {
         [ReadOnly]
-        public NativeArray<float3> AvgPositions;
-        [ReadOnly]
-        public NativeArray<float3> AvgVelocities;
-        [ReadOnly]
-        public NativeArray<float3> SeperationVectors;
+        public NativeArray<float3> DeltaVs;
 
-        public Settings settings;
+        public float Damping;
 
         public float DeltaTime;
 
         [BurstCompile]
         public void Execute([EntityIndexInQuery] int indexInQuery, ref Boid boid, ref LocalTransform transform)
         {
-            var s = settings;
+            boid.Velocity += DeltaVs[indexInQuery] * DeltaTime;
 
-            float3 avgPos = AvgPositions[indexInQuery];
-            float3 avgVel = AvgVelocities[indexInQuery];
+            boid.Velocity *= (1 - Damping * DeltaTime);
 
-            float3 cohesion = (avgPos - transform.Position) * s.CohesionWeight;
-            float3 alignment = (avgVel - boid.Velocity) * s.AlignmentWeight;
-            float3 seperation = SeperationVectors[indexInQuery] * s.SeperationWeight;
-            float3 targetVec = (s.TargetPosition - avgPos) * s.TargetSeekWeight;
 
-            boid.Velocity += (cohesion + alignment + seperation + targetVec) * DeltaTime;
+            /*
+            float sqrSpeed = math.lengthsq(boid.Velocity);
 
-            float sqrMag = math.lengthsq(boid.Velocity);
-
-            if (sqrMag > s.SqrMaxSpeed)
+            if (sqrSpeed > Damping)
             {
-                boid.Velocity *= math.sqrt(s.SqrMaxSpeed / sqrMag);
+                boid.Velocity *= math.sqrt(Damping / sqrSpeed);
             }
+            */
 
             transform.Position += boid.Velocity * DeltaTime;
         }
