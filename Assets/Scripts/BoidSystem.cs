@@ -20,6 +20,9 @@ namespace Boids
     {
         EntityQuery boidQuery;
 
+        NativeArray<float3> searchOffsets;
+        bool builtSearchOffsets;
+
         [BurstCompile]
         public void OnCreate(ref SystemState state)
         {
@@ -28,6 +31,7 @@ namespace Boids
             boidQuery = new EntityQueryBuilder(Allocator.Temp)
                 .WithAll<Boid, LocalTransform>()
                 .Build(ref state);
+
         }
 
         [BurstCompile]
@@ -37,29 +41,18 @@ namespace Boids
 
             int boidCount = boidQuery.CalculateEntityCount();
 
-            var Positions = CollectionHelper.CreateNativeArray<float3, RewindableAllocator>(boidCount, ref state.WorldUnmanaged.UpdateAllocator);
-            var Velocities = CollectionHelper.CreateNativeArray<float3, RewindableAllocator>(boidCount, ref state.WorldUnmanaged.UpdateAllocator);
-            var VelocityChanges = CollectionHelper.CreateNativeArray<float3, RewindableAllocator>(boidCount, ref state.WorldUnmanaged.UpdateAllocator);
+            if (!builtSearchOffsets)
+            {
+                BuildSearchOffsets(in settings, out searchOffsets);
+                builtSearchOffsets = true;
+            }
 
-            int offsetCount = 2 * settings.DetectionCellSize + 1;
-            offsetCount *= offsetCount * offsetCount;
-            offsetCount -= 1;
-
-            var SearchOffsets = CollectionHelper.CreateNativeArray<float3, RewindableAllocator>(offsetCount, ref state.WorldUnmanaged.UpdateAllocator);
-            int size = 0;
-            for (int dx = -settings.DetectionCellSize; dx <= settings.DetectionCellSize; dx++)
-                for (int dy = -settings.DetectionCellSize; dy <= settings.DetectionCellSize; dy++)
-                    for (int dz = -settings.DetectionCellSize; dz <= settings.DetectionCellSize; dz++)
-                    {
-                        if (dx == 0 && dy == 0 && dz == 0) continue;
-                        float3 offset = settings.CellSize * math.float3(dx, dy, dz);
-                        SearchOffsets[size++] = offset;
-                    }
-
-            
-
-            var CellHash = new NativeParallelMultiHashMap<int, int>(boidCount * (offsetCount + 1), state.WorldUnmanaged.UpdateAllocator.ToAllocator);
+            var CellHash = new NativeParallelMultiHashMap<int, int>(boidCount * (searchOffsets.Length + 1), state.WorldUnmanaged.UpdateAllocator.ToAllocator);
             var BoidHashes = CollectionHelper.CreateNativeArray<int, RewindableAllocator>(boidCount, ref state.WorldUnmanaged.UpdateAllocator);
+
+            var Positions = CollectionHelper.CreateNativeArray<float3, RewindableAllocator>(boidCount, ref state.WorldUnmanaged.UpdateAllocator);
+            var Headings = CollectionHelper.CreateNativeArray<float3, RewindableAllocator>(boidCount, ref state.WorldUnmanaged.UpdateAllocator);
+            var NewHeadings = CollectionHelper.CreateNativeArray<float3, RewindableAllocator>(boidCount, ref state.WorldUnmanaged.UpdateAllocator);
 
 
             var hashJobHandle = new HashJob
@@ -67,13 +60,13 @@ namespace Boids
                 CellHash = CellHash.AsParallelWriter(),
                 BoidHashes = BoidHashes,
                 InverseCellSize = 1 / settings.CellSize,
-                SearchOffsets = SearchOffsets,
+                SearchOffsets = searchOffsets,
             }.ScheduleParallel(boidQuery, state.Dependency);
 
             var copyDataJobHandle = new CopyDataJob
             {
                 Positions = Positions,
-                Velocities = Velocities,
+                Velocities = Headings,
             }.ScheduleParallel(boidQuery, state.Dependency);
 
             var initHandle = JobHandle.CombineDependencies(hashJobHandle, copyDataJobHandle);
@@ -83,14 +76,14 @@ namespace Boids
                 BoidHashes = CellHash,
                 CellIndices = BoidHashes,
                 Positions = Positions,
-                Velocities = Velocities,
-                DeltaVs = VelocityChanges,
+                Velocities = Headings,
+                DeltaVs = NewHeadings,
                 Settings = settings,
             }.ScheduleParallel(boidCount, 32, initHandle);
 
             var boidUpdateJobHandle = new BoidUpdateJob
             {
-                DeltaVs = VelocityChanges,
+                DeltaVs = NewHeadings,
                 Damping = settings.Damping,
                 DeltaTime = SystemAPI.Time.DeltaTime
             }.ScheduleParallel(boidQuery, steerJobHandle);
@@ -99,9 +92,30 @@ namespace Boids
         }
 
         [BurstCompile]
+        public static void BuildSearchOffsets(in Settings settings, out NativeArray<float3> searchOffsets)
+        {
+            int offsetCount = 2 * settings.DetectionCellSize + 1;
+            offsetCount *= offsetCount * offsetCount;
+            offsetCount -= 1;
+
+            searchOffsets = new NativeArray<float3>(offsetCount, Allocator.Persistent);
+
+            int i = 0;
+            for (int x = -settings.DetectionCellSize; x <= settings.DetectionCellSize; x++)
+                for (int y = -settings.DetectionCellSize; y <= settings.DetectionCellSize; y++)
+                    for (int z = -settings.DetectionCellSize; z <= settings.DetectionCellSize; z++)
+                    {
+                        if (x == 0 && y == 0 && z == 0) continue;
+                        float3 offset = settings.CellSize * math.float3(x, y, z);
+                        searchOffsets[i++] = offset;
+                    }
+            //var SearchOffsets = CollectionHelper.CreateNativeArray<float3, RewindableAllocator>(offsetCount, ref state.WorldUnmanaged.UpdateAllocator);
+        }
+
+        [BurstCompile]
         public void OnDestroy(ref SystemState state)
         {
-
+            searchOffsets.Dispose();
         }
     }
 
