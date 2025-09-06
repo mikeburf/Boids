@@ -1,5 +1,9 @@
 # Boids
 
-A BOIDs simulation written with Unity DOTS
+A BOIDs simulation written with Unity DOTS.
 Very barebones for now.
-I'll build this and put it somewhere visible once it actually looks impressive
+
+Changes I'd like to make:
+- Configuration and camera control
+- Switch from spatial hashing to a quadtree
+- Implement some behavior from the [original boids paper](https://www.red3d.com/cwr/papers/1987/boids.html).
